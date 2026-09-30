@@ -80,14 +80,28 @@ def rsi(s, n=14):
     return 100 - 100 / (1 + up / dn)
 
 
+def adx_atr(h, l, c, n=14):
+    """Wilder ADX (trend strength) and ATR (typical daily range), idea borrowed from the uploaded repo."""
+    up, dn = h.diff(), -l.diff()
+    pdm = pd.Series(np.where((up > dn) & (up > 0), up, 0.0), index=h.index)
+    mdm = pd.Series(np.where((dn > up) & (dn > 0), dn, 0.0), index=h.index)
+    tr = pd.concat([h - l, (h - c.shift()).abs(), (l - c.shift()).abs()], axis=1).max(axis=1)
+    atr = tr.ewm(alpha=1 / n, adjust=False).mean()
+    pdi = 100 * pdm.ewm(alpha=1 / n, adjust=False).mean() / atr
+    mdi = 100 * mdm.ewm(alpha=1 / n, adjust=False).mean() / atr
+    dx = 100 * (pdi - mdi).abs() / (pdi + mdi)
+    return dx.ewm(alpha=1 / n, adjust=False).mean(), atr
+
+
 def features(x, nifty):
     """One row per day, using exactly the same rules for today's scan and for the backtest."""
     c, v, h, l = x["Close"], x["Volume"], x["High"], x["Low"]
     n = nifty.reindex(x.index).ffill()
     e20, e50, e200 = ema(c, 20), ema(c, 50), ema(c, 200)
     macd = ema(c, 12) - ema(c, 26)
+    adx14, atr = adx_atr(h, l, c)
     f = pd.DataFrame(index=x.index)
-    f["Close"], f["RSI"] = c, rsi(c)
+    f["Close"], f["RSI"], f["e20"] = c, rsi(c), e20
     f["Level"] = c.shift(1).rolling(60).max()                  # highest close of the prior ~3 months
     f["gap"] = (c / f["Level"] - 1) * 100
     f["fresh"] = c.shift(1) <= f["Level"].shift(1)             # yesterday was still below the level
@@ -96,12 +110,14 @@ def features(x, nifty):
     f["stop"] = l.rolling(10).min()
     f["risk"] = (c - f["stop"]) / c * 100
     f["ext"] = (c / e20 - 1) * 100
-    f["strong"] = c >= l + 0.75 * (h - l)
+    f["strong"] = (c >= l + 0.75 * (h - l)) & ((h - l) <= 2.5 * atr)   # closes near the high, candle not oversized
+    f["nr7"] = (h - l) <= (h - l).rolling(7).min()                      # narrowest range of the last 7 days
     f["good"] = (n > n.rolling(50).mean()) & (n > n.rolling(200).mean())
     ok = pd.DataFrame({
         "Uptrend (price>50>200 EMA, 200 rising)": (c > e50) & (e50 > e200) & (e200 > e200.shift(20)),
         "RSI 50-80": f["RSI"].between(50, 80),
         "MACD up and above 0": (macd > ema(macd, 9)) & (macd > 0),
+        "Trend strength (ADX 20+)": adx14 >= 20,
         "At or within 3% of 3-month high": f["gap"] >= -3,
         "Within 10% of 52w high": c >= 0.9 * c.rolling(252).max(),
         "Beats Nifty (3m)": c / c.shift(63) > n / n.shift(63),
@@ -144,45 +160,70 @@ def scan(x, nifty):
     return {"Status": st_, "Breakout": day, "Days ago": age if age is not None else np.nan,
             "Score": int(t["Score"]), "Close": round(t["Close"], 2), "Breakout level": round(s["Level"], 2),
             "% vs level": round((t["Close"] / s["Level"] - 1) * 100, 1), "Since breakout %": round(since, 1),
-            "Volume x": round(s["vr"], 1), "Range %": round(s["rng"], 1), "RSI": round(t["RSI"], 1),
+            "Volume x": round(s["vr"], 1), "Range %": round(s["rng"], 1), "RSI": round(t["RSI"], 1), "6m return %": round((t["Close"] / x["Close"].iloc[-127] - 1) * 100, 1),
+            "3m return %": round((t["Close"] / x["Close"].iloc[-64] - 1) * 100, 1), "NR7": "✔" if t["nr7"] else "",
             "Stop": round(s["stop"], 2), "Risk %": round(risk, 1), "Above 20 EMA %": round(t["ext"], 1),
             "Liquidity (Rs cr)": round((x["Close"] * x["Volume"]).iloc[-20:].mean() / 1e7, 1),
             **{k: ("✔" if b else "") for k, b in ok.iloc[-1].items()}}
 
 
-def backtest(prices, nifty, horizon=20):
-    """Replay every past 🟢 signal: buy at the close, stop = 10-day low, target = 2x risk, max 20 days."""
+def backtest(prices, nifty, horizon=20, trail_days=60):
+    """Replay every past 🟢 signal like a real trader: buy NEXT day's open, stop = signal-day 10-day low,
+    gap-downs fill at the open (worse than the stop), two exits compared: fixed 1:2 target vs 20 EMA trailing exit."""
     rows = []
     for sym, x in prices.items():
         f, _ = features(x, nifty)
-        h, l, c, stp = x["High"].values, x["Low"].values, x["Close"].values, f["stop"].values
+        o, h, l, c = (x[k].values for k in ("Open", "High", "Low", "Close"))
+        stp, e20 = f["stop"].values, f["e20"].values
         for i in np.flatnonzero((f["signal"] == "🟢").values):
-            if i + horizon >= len(c) or c[i] - stp[i] <= 0:
+            if i + trail_days + 1 >= len(c):
                 continue
-            e, rk, r, out = c[i], c[i] - stp[i], None, "time"
+            e = o[i + 1]
+            rk = e - stp[i]
+            if rk <= 0 or rk / e > 0.15:
+                continue
+            r, out = None, "time"
             for j in range(i + 1, i + horizon + 1):
                 if l[j] <= stp[i]:
-                    r, out = -1.0, "stop"; break
+                    r, out = (min(stp[i], o[j]) - e) / rk, "stop"; break
                 if h[j] >= e + 2 * rk:
-                    r, out = 2.0, "target"; break
+                    r, out = (max(e + 2 * rk, o[j]) - e) / rk, "target"; break
             if r is None:
                 r = (c[i + horizon] - e) / rk
-            rows.append({"Symbol": sym, "Date": x.index[i].date(), "R": r, "Out": out, "Ret20": c[i + horizon] / e - 1,
-                         "Green": bool(f["good"].iloc[i]), "Tight": bool(f["rng"].iloc[i] <= 10)})
+            rt = None
+            for j in range(i + 1, i + trail_days + 1):
+                if l[j] <= stp[i]:
+                    rt = (min(stp[i], o[j]) - e) / rk; break
+                if c[j] < e20[j]:
+                    rt = (c[j] - e) / rk; break
+            if rt is None:
+                rt = (c[i + trail_days] - e) / rk
+            rows.append({"Symbol": sym, "Date": x.index[i].date(), "Year": x.index[i].year, "R": r, "Out": out, "R2": rt,
+                         "Ret20": c[i + horizon] / e - 1, "CostR": e / rk, "Green": bool(f["good"].iloc[i]),
+                         "Tight": bool(f["rng"].iloc[i] <= 10)})
     return pd.DataFrame(rows)
 
 
-def summarise(b):
+def _stats(d, cost):
+    rn, r2 = d["R"] - cost / 100 * d["CostR"], d["R2"] - cost / 100 * d["CostR"]
+    neg = -rn[rn < 0].sum()
+    return {"Signals": len(d), "Hit 1:2 target %": round((d["Out"] == "target").mean() * 100),
+            "Stopped out %": round((d["Out"] == "stop").mean() * 100),
+            "Avg R (fixed 1:2 exit)": round(rn.mean(), 2), "Avg R (trail 20 EMA exit)": round(r2.mean(), 2),
+            "Profit factor": round(rn[rn > 0].sum() / neg, 2) if neg > 0 else None}
+
+
+def summarise(b, cost):
     rows = []
     for name, m in (("All past 🟢 breakouts", b["R"].notna()), ("Only when Nifty was above 50 & 200 DMA", b["Green"]),
                     ("Only with a tight base (under 10%)", b["Tight"]), ("Both conditions", b["Green"] & b["Tight"])):
-        d = b[m]
-        if len(d):
-            rows.append({"Setup": name, "Signals": len(d), "Hit 1:2 target %": round((d["Out"] == "target").mean() * 100),
-                         "Stopped out %": round((d["Out"] == "stop").mean() * 100),
-                         "Neither in 20 days %": round((d["Out"] == "time").mean() * 100),
-                         "Avg R per trade": round(d["R"].mean(), 2), "Avg 20-day return %": round(d["Ret20"].mean() * 100, 1)})
+        if m.any():
+            rows.append({"Setup": name, **_stats(b[m], cost)})
     return pd.DataFrame(rows)
+
+
+def by_year(b, cost):
+    return pd.DataFrame([{"Year": y, **_stats(d, cost)} for y, d in b.groupby("Year")])
 
 
 def guide(r):
@@ -273,17 +314,27 @@ with st.expander("How to read the results (start here)"):
 - 🟠 **Extended / already running:** the move has happened. Do not chase; wait for a pullback.
 - 🔴 **Avoid / failed breakout:** no uptrend, weak versus the Nifty, or a breakout that closed back below its level.
 
-**Score (out of 8)** counts trend, RSI, MACD, closeness to highs, strength versus the Nifty and base tightness. Status matters more than score.
-**P/E** is shown for the top 40 candidates only. **Risk %** is the gap to the suggested stop; above 8% means a smaller position.""")
+**Score (out of 9)** counts trend, trend strength (ADX), RSI, MACD, closeness to highs, strength versus the Nifty and base tightness. Status matters more than score.
+**Sector rank** orders industries by their median 3-month return (1 = strongest). **RS rank %** ranks the stock's 6-month return among all scanned stocks (80+ = market leader). **P/E** is shown for the top 40 candidates only. **Risk %** is the gap to the suggested stop; above 8% means a smaller position.""")
 
-min_score = st.sidebar.slider("Minimum score (out of 8)", 0, 8, 3)
+min_score = st.sidebar.slider("Minimum score (out of 9)", 0, 9, 3)
 min_liq = st.sidebar.number_input("Minimum daily traded value (Rs crore)", 0.0, 500.0, 5.0)
 caps = st.sidebar.multiselect("Company size", ["Large", "Mid"], ["Large", "Mid"])
 sectors = st.sidebar.multiselect("Industry filter (optional)", sorted(uni["Industry"].unique()))
+top_sec = st.sidebar.slider("Only show the top N strongest sectors (0 = all)", 0, 30, 0)
+st.sidebar.markdown("**Your trade plan**")
+capital = st.sidebar.number_input("Trading capital (Rs)", 10000, 100000000, 200000, step=10000)
+risk_pct = st.sidebar.number_input("Risk per trade (% of capital)", 0.1, 5.0, 1.0, step=0.1)
+cost_pct = st.sidebar.number_input("Round-trip cost + slippage assumed in backtest (%)", 0.0, 2.0, 0.3, step=0.05)
 
 if st.button("Run scan", type="primary"):
     prices = load_prices(tuple(uni["Symbol"]))
-    st.session_state["res"] = pd.DataFrame([{"Symbol": s, **scan(x, nifty)} for s, x in prices.items()]).merge(uni, on="Symbol")
+    r0 = pd.DataFrame([{"Symbol": s, **scan(x, nifty)} for s, x in prices.items()]).merge(uni, on="Symbol")
+    r0["RS rank %"] = (r0["6m return %"].rank(pct=True) * 100).round()
+    sec = r0.groupby("Industry")["3m return %"].median()
+    r0["Sector 3m %"] = r0["Industry"].map(sec).round(1)
+    r0["Sector rank"] = r0["Industry"].map(sec.rank(ascending=False)).round().astype("Int64")
+    st.session_state["res"] = r0
     with st.spinner("Backtesting the same rules on 5 years of history..."):
         st.session_state["bt"] = backtest(prices, nifty)
 
@@ -292,30 +343,38 @@ if res is None:
     st.write("Press **Run scan** (best after 4 PM IST, when today's candle is final).")
     st.stop()
 
-st.subheader("How accurate has this scanner been? (backtest of the same rules)")
+st.subheader("How accurate has this scanner been? (realistic backtest of the same rules)")
 bt = st.session_state.get("bt")
 if bt is None or bt.empty:
     st.info("Not enough past 🟢 signals to test.")
 else:
-    sm = summarise(bt)
+    sm = summarise(bt, cost_pct)
     a = sm.iloc[0]
     m1, m2, m3, m4 = st.columns(4)
     m1.metric("Past signals tested", int(a["Signals"]))
     m2.metric("Hit 1:2 target first", f"{a['Hit 1:2 target %']}%")
     m3.metric("Stopped out first", f"{a['Stopped out %']}%")
-    m4.metric("Average per trade", f"{a['Avg R per trade']} R")
+    m4.metric("Avg result per trade (after costs)", f"{a['Avg R (fixed 1:2 exit)']} R")
+    if a["Avg R (fixed 1:2 exit)"] <= 0:
+        st.error("After costs the fixed 1:2 exit did not make money on past data. Treat this scanner as a study tool only and paper trade.")
+    else:
+        st.success("Positive average result on past data, but it is an estimate, not a promise. Paper trade before using real money.")
     st.dataframe(sm, use_container_width=True, hide_index=True)
-    st.caption("Method: each past day a stock met today's 🟢 rules, buy at that close, stop at the 10-day low, target at twice the "
-               "risk, exit after 20 trading days if neither is hit. R = one unit of risk (-1R stop, +2R target). With a 1:2 "
-               "target you break even at about a 34% hit rate. Limits: only today's Nifty 100 and Midcap 150 companies are "
-               "tested (survivorship bias), costs are ignored, signals cluster in bull markets, and the past does not "
-               "guarantee the future. Treat it as an estimate of reliability, not a promise.")
+    st.markdown("**Is it consistent? Results by year** (big swings between years mean the edge is unreliable)")
+    st.dataframe(by_year(bt, cost_pct), use_container_width=True, hide_index=True)
+    st.caption("Method: each past day a stock met today's 🟢 rules, buy at the NEXT day's open (as a real trader would), stop at the "
+               "signal day's 10-day low, gaps below the stop fill at the open, costs deducted. Two exits are compared: a fixed 1:2 target "
+               "(20 days) and riding the trend until a close below the 20 EMA (60 days). R = one unit of risk. A 1:2 target breaks "
+               "even near a 34% hit rate. Limits: only today's Nifty 100 and Midcap 150 companies are tested (survivorship bias makes "
+               "results look better than real life), signals cluster in bull markets, and results/news surprises are not modelled.")
     st.download_button("Download backtest trades", bt.to_csv(index=False), "backtest.csv")
 
 df = res[(res["Score"] >= min_score) & (res["Liquidity (Rs cr)"] >= min_liq)]
 df = df[df["Cap"].isin(caps + ["Large/Mid"])]
 if sectors:
     df = df[df["Industry"].isin(sectors)]
+if top_sec:
+    df = df[(df["Sector rank"] <= top_sec).fillna(False)]
 df = df.sort_values(["Days ago", "Score", "Volume x"], ascending=[True, False, False])
 focus = df[df["Status"].str[0].isin(["🟢", "🟡", "🔵", "⚪"]) | (df["Breakout"] != "")].head(40)
 with st.spinner("Fetching P/E for the top candidates..."):
@@ -324,7 +383,7 @@ df = df.assign(**{k: df["Symbol"].map(lambda s, k=k: fund.get(s, {}).get(k)) for
 st.subheader(f"{len(df)} stocks passed the filters, {len(res)} scanned")
 
 COLS = ["Company Name", "Symbol", "Cap", "Status", "Breakout", "Score", "Close", "Breakout level", "% vs level",
-        "Since breakout %", "Volume x", "Range %", "RSI", "Stop", "Risk %", "P/E", "Industry"]
+        "Since breakout %", "Volume x", "RS rank %", "Range %", "RSI", "Stop", "Risk %", "P/E", "Sector rank", "Industry"]
 S0 = df["Status"].str[0]
 groups = [("🟢 Breakouts (last 3 days)", df["Breakout"] != ""), ("🔵 Watchlist", S0.isin(["🔵", "⚪"]) & (df["Breakout"] == "")),
           ("🟠 Don't chase", (S0 == "🟠") & (df["Breakout"] == "")), ("🔴 Avoid", S0 == "🔴"), ("All", S0.notna())]
@@ -334,6 +393,8 @@ for tab, (name, mask) in zip(st.tabs([g[0] for g in groups]), groups):
         if name.startswith("🟢") and d.empty:
             st.info("No breakouts in the last 3 days among the filtered stocks. Try lowering the minimum score or liquidity. "
                     "Quiet or weak markets can have very few real breakouts, and that is normal.")
+        if name.startswith("🟢") and not good:
+            st.warning("Nifty is below its 50 or 200 DMA. Compare the backtest rows above for this condition and be extra cautious or skip.")
         st.dataframe(d[COLS], use_container_width=True, hide_index=True)
         st.caption(f"{len(d)} stocks. 'Range %' is the width of the base before the breakout (under 10% is tight).")
 with st.expander("Show every check for every stock"):
@@ -347,11 +408,21 @@ if len(df):
     row = df[df["Symbol"] == sym].iloc[0]
     px = load_prices(tuple(uni["Symbol"])).get(sym)
     st.markdown(guide(row))
+    per = row["Close"] - row["Stop"]
+    if per > 0:
+        qty = int(capital * risk_pct / 100 / per)
+        st.info(f"**Position size for your plan:** risk Rs {capital * risk_pct / 100:,.0f} / Rs {per:.2f} per share = **{qty} shares** "
+                f"(about Rs {qty * row['Close']:,.0f}, {qty * row['Close'] / capital * 100:.0f}% of capital). 1:2 target near Rs {row['Close'] + 2 * per:.2f}. "
+                f"Fifteen losses in a row at this risk would cost about {(1 - (1 - risk_pct / 100) ** 15) * 100:.0f}% of capital, so keep risk small. "
+                "Before entering, check the company's results date and recent news; scanners cannot see event risk.")
+        if qty * row["Close"] > 0.20 * capital:
+            st.warning("This position is over 20% of your capital. Consider fewer shares or skip it.")
     if px is not None:
         st.plotly_chart(draw(px, sym), use_container_width=True)
         st.plotly_chart(compare(px, nifty, sym), use_container_width=True)
-    passed = [k for k in row.index if row[k] == "✔"]
-    failed = [k for k in row.index if row[k] == ""]
+    chk = list(features(px, nifty)[1].columns) if px is not None else []
+    passed = [k for k in chk if row[k] == "✔"]
+    failed = [k for k in chk if row[k] == ""]
     st.success("Checks passed: " + (", ".join(passed) or "none"))
     st.warning("Checks not passed: " + (", ".join(failed) or "none"))
     st.link_button("Also open on TradingView (optional)", "https://in.tradingview.com/chart/?symbol=NSE%3A" + quote(sym, safe=""))
