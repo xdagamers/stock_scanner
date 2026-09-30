@@ -2,9 +2,12 @@
 import io
 
 import pandas as pd
+import plotly.graph_objects as go
 import requests
 import streamlit as st
 import yfinance as yf
+from plotly.subplots import make_subplots
+from urllib.parse import quote
 
 st.set_page_config(page_title="NSE Swing Scanner", layout="wide")
 LIST_URL = "https://niftyindices.com/IndexConstituent/ind_nifty500list.csv"
@@ -96,6 +99,32 @@ def analyse(x, nifty_ret):
     }
 
 
+def draw(x, sym):
+    c = x["Close"]
+    d = pd.DataFrame({"e20": ema(c, 20), "e50": ema(c, 50), "e200": ema(c, 200),
+                      "rsi": rsi(c), "vavg": x["Volume"].rolling(20).mean()}).join(x).tail(130)
+    fig = make_subplots(rows=3, cols=1, shared_xaxes=True, row_heights=[.6, .2, .2], vertical_spacing=.03)
+    fig.add_trace(go.Candlestick(x=d.index, open=d["Open"], high=d["High"], low=d["Low"], close=d["Close"],
+                                 name="Price", increasing_line_color="#1f8a5b",
+                                 decreasing_line_color="#c2413b"), 1, 1)
+    for k, name, col in (("e20", "EMA 20", "#3b82f6"), ("e50", "EMA 50", "#d98a00"), ("e200", "EMA 200", "#888888")):
+        fig.add_trace(go.Scatter(x=d.index, y=d[k], name=name, line=dict(color=col, width=1.4)), 1, 1)
+    fig.add_hline(y=c.iloc[-21:-1].max(), line_dash="dash", line_color="#d98a00",
+                  annotation_text="20-day high (breakout level)", row=1, col=1)
+    fig.add_hline(y=x["Low"].iloc[-10:].min(), line_dash="dash", line_color="#c2413b",
+                  annotation_text="Stop (10-day low)", row=1, col=1)
+    fig.add_trace(go.Bar(x=d.index, y=d["Volume"], name="Volume", marker_color="#8aa0ab"), 2, 1)
+    fig.add_trace(go.Scatter(x=d.index, y=d["vavg"], name="20-day avg volume",
+                             line=dict(color="#d98a00", width=1.2)), 2, 1)
+    fig.add_trace(go.Scatter(x=d.index, y=d["rsi"], name="RSI 14", line=dict(color="#3b82f6", width=1.4)), 3, 1)
+    for lvl in (40, 80):
+        fig.add_hline(y=lvl, line_dash="dot", line_color="#888888", row=3, col=1)
+    fig.update_xaxes(rangebreaks=[dict(bounds=["sat", "mon"])])
+    fig.update_layout(height=680, title=sym, xaxis_rangeslider_visible=False,
+                      margin=dict(l=10, r=10, t=40, b=10), legend=dict(orientation="h"))
+    return fig
+
+
 st.title("Nifty 500 scanner for swing and positional setups")
 st.caption("Prices: Yahoo Finance (unofficial, about 15 minutes delayed). Educational only, not financial "
            "advice. A high score is a shortlist, not a prediction.")
@@ -138,7 +167,18 @@ if res is not None:
         df = df.join(pd.DataFrame([fundamentals(s) for s in df["Symbol"]], index=df.index))
     st.dataframe(df, use_container_width=True, hide_index=True)
     st.download_button("Download CSV", df.to_csv(index=False), "scan.csv")
-    st.info("Next step: open each name on TradingView and apply your Day 30 checklist "
+    if len(df):
+        sym = st.selectbox("Open chart for", df["Symbol"].tolist())
+        row = df[df["Symbol"] == sym].iloc[0]
+        px = load_prices(tuple(uni["Symbol"])).get(sym)
+        if px is not None:
+            st.plotly_chart(draw(px, sym), use_container_width=True)
+        names = [k for k in row.index if row[k] in ("✔", "")]
+        st.success("Passed: " + (", ".join(k for k in names if row[k] == "✔") or "none"))
+        st.warning("Not passed: " + (", ".join(k for k in names if row[k] == "") or "none"))
+        st.link_button("Also open on TradingView (optional)",
+                       "https://in.tradingview.com/chart/?symbol=NSE%3A" + quote(sym, safe=""))
+    st.info("Next step: pick a stock above, study its chart and apply your Day 30 checklist "
             "(tight base, clean breakout candle, stop and 1:2 reward). Skip it if any check fails.")
 else:
     st.write("Press **Run scan** to analyse all Nifty 500 stocks.")
