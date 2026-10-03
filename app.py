@@ -1,5 +1,7 @@
 """Large + mid cap NSE scanner for swing and positional setups. Educational only, not advice."""
 import io
+from datetime import datetime
+from html import escape
 from urllib.parse import quote
 
 import numpy as np
@@ -10,7 +12,7 @@ import streamlit as st
 import yfinance as yf
 from plotly.subplots import make_subplots
 
-st.set_page_config(page_title="NSE Swing Scanner", layout="wide")
+st.set_page_config(page_title="NSE Swing Scanner", page_icon="📈", layout="wide", initial_sidebar_state="collapsed")
 BASE = "https://niftyindices.com/IndexConstituent/"
 LISTS = {"Large": "ind_nifty100list.csv", "Mid": "ind_niftymidcap150list.csv"}
 
@@ -287,9 +289,83 @@ def compare(x, nifty, sym):
     return fig
 
 
-st.title("Large and mid cap scanner for swing and positional setups")
-st.caption("Nifty 100 + Nifty Midcap 150 stocks. Prices: Yahoo Finance (unofficial, about 15 minutes delayed), "
-           "5 years of daily data. Educational only, not financial advice. A status is a shortlist, not a prediction.")
+COLS = ["Company Name", "Symbol", "Cap", "Status", "Breakout", "Score", "Close", "Breakout level", "% vs level",
+        "Since breakout %", "Volume x", "RS rank %", "Range %", "RSI", "Stop", "Risk %", "P/E", "Sector rank", "Industry"]
+
+
+CSS = """<style>
+.block-container{padding-top:1rem;max-width:1100px}
+.hero{display:flex;gap:12px;flex-wrap:wrap;justify-content:space-between;align-items:center;padding:18px 20px;border-radius:16px;background:linear-gradient(120deg,#4f46e5,#0891b2);color:#fff;margin-bottom:10px}
+.hero h1{margin:0;padding:0;font-size:1.6rem;color:#fff}.hero p{margin:2px 0 0;opacity:.92;color:#fff}
+.mk{padding:8px 14px;border-radius:12px;color:#fff;font-weight:700;display:flex;flex-direction:column}.mk small{font-weight:400}
+.kpis{display:grid;grid-template-columns:repeat(auto-fit,minmax(130px,1fr));gap:10px;margin:8px 0 14px}
+.kpi{background:rgba(127,127,127,.10);border-radius:12px;padding:12px 14px}
+.kv{font-size:1.7rem;font-weight:800;line-height:1.1}.kl{font-weight:600;font-size:.85rem}.ks{font-size:.72rem;opacity:.7}
+.pill{display:inline-block;padding:2px 10px;border-radius:999px;font-size:.75rem;font-weight:700;white-space:normal;text-align:center}
+.scard{background:rgba(127,127,127,.09);border-radius:12px;padding:12px 14px;margin:8px 0}
+.scard .top{display:flex;justify-content:space-between;gap:8px;align-items:flex-start}
+.scard small{display:block;opacity:.72}
+.scard .grid{display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin-top:10px}
+.scard .grid div{display:flex;flex-direction:column;font-size:.95rem}.scard .grid span{font-size:.68rem;opacity:.65}
+.chip{display:inline-block;margin:3px;padding:3px 10px;border-radius:8px;font-size:.78rem}
+div[data-baseweb="tab-list"]{position:sticky;top:3.5rem;z-index:50;gap:4px;overflow-x:auto;backdrop-filter:blur(10px);background:rgba(127,127,127,.14);border-radius:12px;padding:2px 6px}
+@media(max-width:640px){.block-container{padding:.5rem .6rem 3rem}.hero h1{font-size:1.2rem}.scard .grid{grid-template-columns:repeat(2,1fr)}.kv{font-size:1.4rem}}
+</style>"""
+COL = {"🟢": "#16a34a", "🟡": "#ca8a04", "🔵": "#2563eb", "⚪": "#64748b", "🟠": "#ea580c", "🔴": "#dc2626"}
+
+
+def pill(text, color):
+    return f'<span class="pill" style="background:{color}26;color:{color};border:1px solid {color}66">{escape(str(text))}</span>'
+
+
+def kpi(label, value, color, sub=""):
+    return (f'<div class="kpi" style="border-top:4px solid {color}"><div class="kv" style="color:{color}">{value}</div>'
+            f'<div class="kl">{label}</div><div class="ks">{sub}</div></div>')
+
+
+def fmt(v, suf="", nd=1):
+    return "–" if v is None or pd.isna(v) else f"{v:,.{nd}f}{suf}"
+
+
+def card(r):
+    c = COL[r["Status"][0]]
+    m = [("Price", f"₹{r['Close']:,.2f}"), ("Level", f"₹{r['Breakout level']:,.2f}"), ("vs level", fmt(r["% vs level"], "%")),
+         ("Volume", fmt(r["Volume x"], "x")), ("RS rank", fmt(r["RS rank %"], nd=0)), ("Risk", fmt(r["Risk %"], "%")),
+         ("P/E", fmt(r.get("P/E"))), ("Score", f"{int(r['Score'])}/9")]
+    cells = "".join(f"<div><b>{v}</b><span>{k}</span></div>" for k, v in m)
+    return (f'<div class="scard" style="border-left:6px solid {c}"><div class="top"><div><b>{escape(str(r["Company Name"]))}</b>'
+            f'<small>{escape(str(r["Symbol"]))} · {r["Cap"]} · {escape(str(r["Industry"]))}</small></div>{pill(r["Status"][2:], c)}</div>'
+            f'<div class="grid">{cells}</div></div>')
+
+
+def tint(v):
+    c = COL.get(str(v)[:1])
+    return f"background-color:{c}33;font-weight:600" if c else ""
+
+
+def styled(d):
+    sty = d.style
+    return (sty.map if hasattr(sty, "map") else sty.applymap)(tint, subset=[k for k in ("Status",) if k in d.columns])
+
+
+def guide_view():
+    items = [("🟢", "Breakout (today, 1 or 2 days ago)", "Closed above its 3-month high on strong volume in an uptrend. Check for resistance just above and prefer a green market."),
+             ("🟡", "Breakout, caution", "Crossed the level but volume or trend is weak. Study it, do not rush."),
+             ("🔵", "Near breakout - watchlist", "Within 3% below the level with a tight base. Best list to study. Set an alert at the level."),
+             ("⚪", "Building (far)", "Strong stock, not close to a breakout yet. Recheck weekly."),
+             ("🟠", "Extended / already running", "The move has happened. Do not chase; wait for a pullback."),
+             ("🔴", "Avoid", "No uptrend, weak versus the Nifty, or a failed breakout.")]
+    st.markdown("".join(f'<div class="scard" style="border-left:6px solid {COL[i]}"><b>{i} {t}</b><small>{d}</small></div>' for i, t, d in items),
+                unsafe_allow_html=True)
+    with st.expander("Columns and terms"):
+        st.markdown("**Score (out of 9)** counts trend, trend strength (ADX), RSI, MACD, closeness to highs, strength versus the Nifty and base tightness. "
+                    "Status matters more than score. **Level** is the highest close of the last 3 months. **vs level** is the distance from it. "
+                    "**Volume** compares with the 50-day average (1.5x+ confirms a breakout). **RS rank** ranks the 6-month return among all scanned "
+                    "stocks (80+ = leader). **Risk** is the gap to the suggested stop (above 8% means a smaller position). **Sector rank** 1 = strongest "
+                    "industry. **P/E** is shown for the top 40 candidates only. Educational only, not financial advice.")
+
+
+st.markdown(CSS, unsafe_allow_html=True)
 try:
     uni = load_universe()
 except Exception:
@@ -300,34 +376,30 @@ except Exception:
     uni = pd.read_csv(up)[["Company Name", "Industry", "Symbol"]].assign(Cap="Large/Mid")
 
 nifty = load_nifty()
-good = nifty.iloc[-1] > nifty.rolling(50).mean().iloc[-1] and nifty.iloc[-1] > nifty.rolling(200).mean().iloc[-1]
-(st.success if good else st.warning)(
-    "Market check: Nifty is above its 50 and 200 DMA, so conditions favour breakouts." if good
-    else "Market check: Nifty is below its 50 or 200 DMA. Trade smaller or wait.")
+n_last, d50, d200 = nifty.iloc[-1], nifty.rolling(50).mean().iloc[-1], nifty.rolling(200).mean().iloc[-1]
+good = n_last > d50 and n_last > d200
+mk = ("#16a34a", "MARKET GREEN") if good else ("#ea580c", "MARKET CAUTION")
+st.markdown(f'<div class="hero"><div><h1>📈 NSE Swing Scanner</h1><p>Large + mid cap breakouts, watchlist and an honest backtest</p></div>'
+            f'<div class="mk" style="background:{mk[0]}">{mk[1]}<small>Nifty {n_last:,.0f} · {(n_last / d50 - 1) * 100:+.1f}% vs 50 DMA · '
+            f'{(n_last / d200 - 1) * 100:+.1f}% vs 200 DMA</small></div></div>', unsafe_allow_html=True)
 
-with st.expander("How to read the results (start here)"):
-    st.markdown("""
-- 🟢 **Breakout today / 1 day ago / 2 days ago:** closed above its 3-month high on strong volume, in an uptrend, and still holds above the level. Check for resistance just above and read the Notes column.
-- 🟡 **Breakout (caution):** crossed the level but volume or trend is weak. Wait or study it carefully.
-- 🔵 **Near breakout - watchlist:** within 3% below the level with a tight base. **Best list to study.** Set an alert at the orange line.
-- ⚪ **Building (far):** strong stock but not close to a breakout. Recheck weekly.
-- 🟠 **Extended / already running:** the move has happened. Do not chase; wait for a pullback.
-- 🔴 **Avoid / failed breakout:** no uptrend, weak versus the Nifty, or a breakout that closed back below its level.
+b1, b2 = st.columns([1, 2])
+run = b1.button("🔄 Run scan", type="primary", use_container_width=True)
+b2.caption(f"Last scan: {st.session_state['ts']}. Yahoo data, about 15 min delayed." if "ts" in st.session_state
+           else "Best after 4 PM IST when the day's candle is final. The first run takes 1-3 minutes.")
 
-**Score (out of 9)** counts trend, trend strength (ADX), RSI, MACD, closeness to highs, strength versus the Nifty and base tightness. Status matters more than score.
-**Sector rank** orders industries by their median 3-month return (1 = strongest). **RS rank %** ranks the stock's 6-month return among all scanned stocks (80+ = market leader). **P/E** is shown for the top 40 candidates only. **Risk %** is the gap to the suggested stop; above 8% means a smaller position.""")
+with st.expander("⚙️ Filters and trade plan"):
+    f1, f2 = st.columns(2)
+    min_score = f1.slider("Minimum score (out of 9)", 0, 9, 3)
+    top_sec = f2.slider("Top N strongest sectors (0 = all)", 0, 30, 0)
+    min_liq = f1.number_input("Min daily traded value (Rs crore)", 0.0, 500.0, 5.0)
+    caps = f2.multiselect("Company size", ["Large", "Mid"], ["Large", "Mid"])
+    sectors = st.multiselect("Industry filter (optional)", sorted(uni["Industry"].unique()))
+    capital = f1.number_input("Trading capital (Rs)", 10000, 100000000, 200000, step=10000)
+    risk_pct = f2.number_input("Risk per trade (%)", 0.1, 5.0, 1.0, step=0.1)
+    cost_pct = f1.number_input("Backtest costs + slippage (%)", 0.0, 2.0, 0.3, step=0.05)
 
-min_score = st.sidebar.slider("Minimum score (out of 9)", 0, 9, 3)
-min_liq = st.sidebar.number_input("Minimum daily traded value (Rs crore)", 0.0, 500.0, 5.0)
-caps = st.sidebar.multiselect("Company size", ["Large", "Mid"], ["Large", "Mid"])
-sectors = st.sidebar.multiselect("Industry filter (optional)", sorted(uni["Industry"].unique()))
-top_sec = st.sidebar.slider("Only show the top N strongest sectors (0 = all)", 0, 30, 0)
-st.sidebar.markdown("**Your trade plan**")
-capital = st.sidebar.number_input("Trading capital (Rs)", 10000, 100000000, 200000, step=10000)
-risk_pct = st.sidebar.number_input("Risk per trade (% of capital)", 0.1, 5.0, 1.0, step=0.1)
-cost_pct = st.sidebar.number_input("Round-trip cost + slippage assumed in backtest (%)", 0.0, 2.0, 0.3, step=0.05)
-
-if st.button("Run scan", type="primary"):
+if run:
     prices = load_prices(tuple(uni["Symbol"]))
     r0 = pd.DataFrame([{"Symbol": s, **scan(x, nifty)} for s, x in prices.items()]).merge(uni, on="Symbol")
     r0["RS rank %"] = (r0["6m return %"].rank(pct=True) * 100).round()
@@ -335,39 +407,18 @@ if st.button("Run scan", type="primary"):
     r0["Sector 3m %"] = r0["Industry"].map(sec).round(1)
     r0["Sector rank"] = r0["Industry"].map(sec.rank(ascending=False)).round().astype("Int64")
     st.session_state["res"] = r0
+    st.session_state["ts"] = datetime.now().strftime("%d %b, %H:%M")
     with st.spinner("Backtesting the same rules on 5 years of history..."):
         st.session_state["bt"] = backtest(prices, nifty)
+    st.rerun()
 
 res = st.session_state.get("res")
 if res is None:
-    st.write("Press **Run scan** (best after 4 PM IST, when today's candle is final).")
+    st.markdown('<div class="scard" style="border-left:6px solid #4f46e5"><b>👋 Start here</b><small>1) Tap <b>Run scan</b> above. '
+                '2) Open <b>Home</b> for the summary, <b>Scanner</b> for the lists, <b>Study</b> for one stock. '
+                '3) Check <b>Accuracy</b> before trusting any signal.</small></div>', unsafe_allow_html=True)
+    guide_view()
     st.stop()
-
-st.subheader("How accurate has this scanner been? (realistic backtest of the same rules)")
-bt = st.session_state.get("bt")
-if bt is None or bt.empty:
-    st.info("Not enough past 🟢 signals to test.")
-else:
-    sm = summarise(bt, cost_pct)
-    a = sm.iloc[0]
-    m1, m2, m3, m4 = st.columns(4)
-    m1.metric("Past signals tested", int(a["Signals"]))
-    m2.metric("Hit 1:2 target first", f"{a['Hit 1:2 target %']}%")
-    m3.metric("Stopped out first", f"{a['Stopped out %']}%")
-    m4.metric("Avg result per trade (after costs)", f"{a['Avg R (fixed 1:2 exit)']} R")
-    if a["Avg R (fixed 1:2 exit)"] <= 0:
-        st.error("After costs the fixed 1:2 exit did not make money on past data. Treat this scanner as a study tool only and paper trade.")
-    else:
-        st.success("Positive average result on past data, but it is an estimate, not a promise. Paper trade before using real money.")
-    st.dataframe(sm, use_container_width=True, hide_index=True)
-    st.markdown("**Is it consistent? Results by year** (big swings between years mean the edge is unreliable)")
-    st.dataframe(by_year(bt, cost_pct), use_container_width=True, hide_index=True)
-    st.caption("Method: each past day a stock met today's 🟢 rules, buy at the NEXT day's open (as a real trader would), stop at the "
-               "signal day's 10-day low, gaps below the stop fill at the open, costs deducted. Two exits are compared: a fixed 1:2 target "
-               "(20 days) and riding the trend until a close below the 20 EMA (60 days). R = one unit of risk. A 1:2 target breaks "
-               "even near a 34% hit rate. Limits: only today's Nifty 100 and Midcap 150 companies are tested (survivorship bias makes "
-               "results look better than real life), signals cluster in bull markets, and results/news surprises are not modelled.")
-    st.download_button("Download backtest trades", bt.to_csv(index=False), "backtest.csv")
 
 df = res[(res["Score"] >= min_score) & (res["Liquidity (Rs cr)"] >= min_liq)]
 df = df[df["Cap"].isin(caps + ["Large/Mid"])]
@@ -380,49 +431,126 @@ focus = df[df["Status"].str[0].isin(["🟢", "🟡", "🔵", "⚪"]) | (df["Brea
 with st.spinner("Fetching P/E for the top candidates..."):
     fund = {s: fundamentals(s) for s in focus["Symbol"]}
 df = df.assign(**{k: df["Symbol"].map(lambda s, k=k: fund.get(s, {}).get(k)) for k in ("P/E", "Debt/Equity", "Profit growth %")})
-st.subheader(f"{len(df)} stocks passed the filters, {len(res)} scanned")
-
-COLS = ["Company Name", "Symbol", "Cap", "Status", "Breakout", "Score", "Close", "Breakout level", "% vs level",
-        "Since breakout %", "Volume x", "RS rank %", "Range %", "RSI", "Stop", "Risk %", "P/E", "Sector rank", "Industry"]
 S0 = df["Status"].str[0]
-groups = [("🟢 Breakouts (last 3 days)", df["Breakout"] != ""), ("🔵 Watchlist", S0.isin(["🔵", "⚪"]) & (df["Breakout"] == "")),
-          ("🟠 Don't chase", (S0 == "🟠") & (df["Breakout"] == "")), ("🔴 Avoid", S0 == "🔴"), ("All", S0.notna())]
-for tab, (name, mask) in zip(st.tabs([g[0] for g in groups]), groups):
-    with tab:
-        d = df[mask]
-        if name.startswith("🟢") and d.empty:
-            st.info("No breakouts in the last 3 days among the filtered stocks. Try lowering the minimum score or liquidity. "
-                    "Quiet or weak markets can have very few real breakouts, and that is normal.")
-        if name.startswith("🟢") and not good:
-            st.warning("Nifty is below its 50 or 200 DMA. Compare the backtest rows above for this condition and be extra cautious or skip.")
-        st.dataframe(d[COLS], use_container_width=True, hide_index=True)
-        st.caption(f"{len(d)} stocks. 'Range %' is the width of the base before the breakout (under 10% is tight).")
-with st.expander("Show every check for every stock"):
-    st.dataframe(df, use_container_width=True, hide_index=True)
-st.download_button("Download CSV", df.to_csv(index=False), "scan.csv")
+buckets = {"🟢 Breakouts": df["Breakout"] != "", "🔵 Watchlist": S0.isin(["🔵", "⚪"]) & (df["Breakout"] == ""),
+           "🟠 Don't chase": (S0 == "🟠") & (df["Breakout"] == ""), "🔴 Avoid": S0 == "🔴", "All": S0.notna()}
+bt = st.session_state.get("bt")
+sm = summarise(bt, cost_pct) if bt is not None and not bt.empty else None
 
-if len(df):
-    order = list(focus["Symbol"]) + [s for s in df["Symbol"] if s not in set(focus["Symbol"])]
-    names = dict(zip(df["Symbol"], df["Company Name"]))
-    sym = st.selectbox("Study a stock", order, format_func=lambda s: f"{names[s]} ({s})")
-    row = df[df["Symbol"] == sym].iloc[0]
-    px = load_prices(tuple(uni["Symbol"])).get(sym)
-    st.markdown(guide(row))
-    per = row["Close"] - row["Stop"]
-    if per > 0:
-        qty = int(capital * risk_pct / 100 / per)
-        st.info(f"**Position size for your plan:** risk Rs {capital * risk_pct / 100:,.0f} / Rs {per:.2f} per share = **{qty} shares** "
-                f"(about Rs {qty * row['Close']:,.0f}, {qty * row['Close'] / capital * 100:.0f}% of capital). 1:2 target near Rs {row['Close'] + 2 * per:.2f}. "
-                f"Fifteen losses in a row at this risk would cost about {(1 - (1 - risk_pct / 100) ** 15) * 100:.0f}% of capital, so keep risk small. "
-                "Before entering, check the company's results date and recent news; scanners cannot see event risk.")
-        if qty * row["Close"] > 0.20 * capital:
-            st.warning("This position is over 20% of your capital. Consider fewer shares or skip it.")
-    if px is not None:
-        st.plotly_chart(draw(px, sym), use_container_width=True)
-        st.plotly_chart(compare(px, nifty, sym), use_container_width=True)
-    chk = list(features(px, nifty)[1].columns) if px is not None else []
-    passed = [k for k in chk if row[k] == "✔"]
-    failed = [k for k in chk if row[k] == ""]
-    st.success("Checks passed: " + (", ".join(passed) or "none"))
-    st.warning("Checks not passed: " + (", ".join(failed) or "none"))
-    st.link_button("Also open on TradingView (optional)", "https://in.tradingview.com/chart/?symbol=NSE%3A" + quote(sym, safe=""))
+t_home, t_scan, t_study, t_acc, t_guide = st.tabs(["🏠 Home", "🔍 Scanner", "📈 Study", "🎯 Accuracy", "📘 Guide"])
+
+with t_home:
+    cnt = {k: int(m.sum()) for k, m in buckets.items()}
+    cards = [kpi("Breakouts (3 days)", cnt["🟢 Breakouts"], COL["🟢"], "act on with a plan"), kpi("Watchlist", cnt["🔵 Watchlist"], COL["🔵"], "wait for the level"),
+             kpi("Don't chase", cnt["🟠 Don't chase"], COL["🟠"], "move already happened"), kpi("Avoid", cnt["🔴 Avoid"], COL["🔴"], "weak or no uptrend")]
+    if sm is not None:
+        a = sm.iloc[0]
+        cards += [kpi("Past hit rate", f"{a['Hit 1:2 target %']}%", "#7c3aed", "reached 1:2 target first"),
+                  kpi("Avg per trade", f"{a['Avg R (fixed 1:2 exit)']} R", COL["🟢"] if a["Avg R (fixed 1:2 exit)"] > 0 else COL["🔴"], "after costs")]
+    st.markdown('<div class="kpis">' + "".join(cards) + "</div>", unsafe_allow_html=True)
+    for title, key in (("🟢 Latest breakouts", "🟢 Breakouts"), ("🔵 Top watchlist", "🔵 Watchlist")):
+        d = df[buckets[key]].head(5)
+        st.markdown(f"#### {title}")
+        if d.empty:
+            st.info("None right now. This is normal in quiet or weak markets. Try lowering the minimum score in the filters." if key.startswith("🟢") else "None match your filters.")
+        else:
+            st.markdown("".join(card(r) for _, r in d.iterrows()), unsafe_allow_html=True)
+    secs = res.groupby("Industry")["3m return %"].median().sort_values(ascending=False)
+    top = pd.concat([secs.head(6), secs.tail(3)]).drop_duplicates()
+    fig = go.Figure(go.Bar(x=top.values, y=top.index, orientation="h", marker_color=[COL["🟢"] if v >= 0 else COL["🔴"] for v in top.values]))
+    fig.update_layout(height=340, title="Sector strength: median 3-month return % (strongest and weakest)", yaxis=dict(autorange="reversed"),
+                      margin=dict(l=10, r=10, t=40, b=10))
+    st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False})
+
+with t_scan:
+    pick = st.radio("List", [f"{k} ({int(m.sum())})" for k, m in buckets.items()], horizontal=True, label_visibility="collapsed")
+    name = list(buckets)[[f"{k} ({int(m.sum())})" for k, m in buckets.items()].index(pick)]
+    d = df[buckets[name]]
+    if name.startswith("🟢") and not good:
+        st.warning("Nifty is below its 50 or 200 DMA. Check the Accuracy tab for how breakouts did in this condition, and be extra cautious.")
+    if d.empty:
+        st.info("No stocks in this list with your filters.")
+    elif st.toggle("Table view (all rows)", False):
+        more = st.toggle("Show all columns", False)
+        cols = COLS if more else ["Company Name", "Status", "Breakout", "Score", "Close", "% vs level", "Volume x", "RS rank %", "Risk %", "P/E"]
+        st.dataframe(styled(d[cols]), use_container_width=True, hide_index=True, height=520, column_config={
+            "Score": st.column_config.ProgressColumn("Score", min_value=0, max_value=9, format="%d"),
+            "RS rank %": st.column_config.ProgressColumn("RS rank", min_value=0, max_value=100, format="%d")})
+    else:
+        st.markdown("".join(card(r) for _, r in d.head(30).iterrows()), unsafe_allow_html=True)
+        if len(d) > 30:
+            st.caption(f"Showing the top 30 of {len(d)}. Turn on Table view to see all.")
+    st.download_button("⬇️ Download this scan (CSV)", df.to_csv(index=False), "scan.csv", use_container_width=True)
+    with st.expander("Every check for every stock"):
+        st.dataframe(df, use_container_width=True, hide_index=True)
+
+with t_study:
+    if df.empty:
+        st.info("No stocks match your filters. Loosen them in the Filters section at the top.")
+    else:
+        order = list(focus["Symbol"]) + [s for s in df["Symbol"] if s not in set(focus["Symbol"])]
+        names = dict(zip(df["Symbol"], df["Company Name"]))
+        sym = st.selectbox("Choose a stock (best candidates first)", order, format_func=lambda s: f"{names[s]} ({s})")
+        row = df[df["Symbol"] == sym].iloc[0]
+        px = load_prices(tuple(uni["Symbol"])).get(sym)
+        st.markdown(card(row), unsafe_allow_html=True)
+        k1, k2, k3, k4 = st.tabs(["📊 Chart", "✅ Checks", "📝 How to read", "💰 Position"])
+        with k1:
+            if px is not None:
+                f1 = draw(px, sym)
+                f1.update_layout(height=560)
+                st.plotly_chart(f1, use_container_width=True, config={"displayModeBar": False})
+                st.plotly_chart(compare(px, nifty, sym), use_container_width=True, config={"displayModeBar": False})
+        with k2:
+            chk = list(features(px, nifty)[1].columns) if px is not None else []
+            chips = lambda ks, c: "".join(f'<span class="chip" style="background:{c}26;color:{c};border:1px solid {c}66">{escape(k)}</span>' for k in ks)
+            st.markdown("**Passed**")
+            st.markdown(chips([k for k in chk if row[k] == "✔"], COL["🟢"]) or "none", unsafe_allow_html=True)
+            st.markdown("**Not passed**")
+            st.markdown(chips([k for k in chk if row[k] == ""], COL["🔴"]) or "none", unsafe_allow_html=True)
+        with k3:
+            st.markdown(guide(row))
+        with k4:
+            per = row["Close"] - row["Stop"]
+            if per > 0:
+                risk_rs = capital * risk_pct / 100
+                qty = int(risk_rs / per)
+                val = qty * row["Close"]
+                p1, p2, p3, p4 = st.columns(4)
+                p1.metric("Shares", f"{qty:,}")
+                p2.metric("Capital used", f"₹{val:,.0f}", f"{val / capital * 100:.0f}% of capital", delta_color="off")
+                p3.metric("Money at risk", f"₹{risk_rs:,.0f}")
+                p4.metric("1:2 target", f"₹{row['Close'] + 2 * per:,.2f}")
+                if val > 0.20 * capital:
+                    st.warning("This position is over 20% of your capital. Consider fewer shares or skip it.")
+                st.caption(f"Fifteen losses in a row at this risk would cost about {(1 - (1 - risk_pct / 100) ** 15) * 100:.0f}% of capital, so keep risk small. "
+                           "Check the company's results date and recent news before entering; scanners cannot see event risk.")
+            else:
+                st.info("The stop is not below the price, so no position size can be calculated.")
+        st.link_button("Open on TradingView (optional)", "https://in.tradingview.com/chart/?symbol=NSE%3A" + quote(sym, safe=""), use_container_width=True)
+
+with t_acc:
+    if sm is None:
+        st.info("Not enough past 🟢 signals to test.")
+    else:
+        a = sm.iloc[0]
+        ar = a["Avg R (fixed 1:2 exit)"]
+        st.markdown('<div class="kpis">' + kpi("Past signals tested", int(a["Signals"]), "#4f46e5") + kpi("Hit 1:2 target first", f"{a['Hit 1:2 target %']}%", COL["🟢"])
+                    + kpi("Stopped out first", f"{a['Stopped out %']}%", COL["🔴"]) + kpi("Avg per trade (after costs)", f"{ar} R", COL["🟢"] if ar > 0 else COL["🔴"])
+                    + "</div>", unsafe_allow_html=True)
+        (st.success if ar > 0 else st.error)(
+            "Positive average result on past data, but it is an estimate, not a promise. Paper trade first." if ar > 0
+            else "After costs the fixed 1:2 exit did not make money on past data. Use this scanner as a study tool and paper trade.")
+        st.markdown("**By setup**")
+        st.dataframe(sm, use_container_width=True, hide_index=True)
+        st.markdown("**By year** (big swings between years mean the edge is unreliable)")
+        st.dataframe(by_year(bt, cost_pct), use_container_width=True, hide_index=True)
+        with st.expander("Method and limits"):
+            st.caption("Each past day a stock met today's 🟢 rules, buy at the NEXT day's open, stop at the signal day's 10-day low, gaps below the stop fill at the open, "
+                       "costs deducted. Two exits are compared: a fixed 1:2 target (20 days) and riding the trend until a close below the 20 EMA (60 days). "
+                       "R = one unit of risk. A 1:2 target breaks even near a 34% hit rate. Only today's Nifty 100 and Midcap 150 companies are tested "
+                       "(survivorship bias flatters results), signals cluster in bull markets, and results/news surprises are not modelled.")
+        st.download_button("⬇️ Download backtest trades (CSV)", bt.to_csv(index=False), "backtest.csv", use_container_width=True)
+
+with t_guide:
+    guide_view()
