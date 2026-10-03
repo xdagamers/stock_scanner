@@ -571,3 +571,47 @@ def optimize_weights(symbols, period="5y", min_rating=7, hold_days=10, max_symbo
         return pd.DataFrame(), DEFAULT_WEIGHTS
     result = pd.DataFrame(rows).sort_values("objective", ascending=False).reset_index(drop=True)
     return result, result.iloc[0]["weights"]
+def scan_single(symbol, max_distance=10.0, period="5y", nifty_df=None):
+    """Fetches and scores a single stock."""
+    df = fetch_history(symbol, period)
+    if df is None or len(df) < 60:
+        return None
+        
+    result = score_stock(df, nifty_df=nifty_df)
+    if result is None:
+        return None
+        
+    # Only return stocks within the user's distance threshold
+    if result["distance_pct"] <= max_distance:
+        result["symbol"] = symbol
+        return result
+        
+    return None
+
+def scan_universe(max_distance=10.0, period="5y"):
+    """Scans the entire NIFTY universe and returns a sorted DataFrame."""
+    symbols = load_universe()
+    
+    # Pre-fetch NIFTY 50 index data to calculate relative strength
+    nifty_df = None
+    try:
+        nifty_df = fetch_history("^NSEI", period)
+    except Exception:
+        pass
+        
+    results = []
+    for sym in symbols:
+        row = scan_single(sym, max_distance=max_distance, period=period, nifty_df=nifty_df)
+        if row is not None:
+            results.append(row)
+            
+    if not results:
+        import pandas as pd
+        return pd.DataFrame()
+        
+    import pandas as pd
+    df = pd.DataFrame(results)
+    
+    # Prioritize the strongest setups (highest rating), then those closest to breaking out
+    df = df.sort_values(by=["rating", "distance_pct"], ascending=[False, True]).reset_index(drop=True)
+    return df
