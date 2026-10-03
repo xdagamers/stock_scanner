@@ -1,0 +1,8 @@
+UPLOAD THIS WHOLE FOLDER TO GITHUB.
+
+Main file:
+streamlit_app.py
+
+Then deploy that file on Streamlit Community Cloud.
+
+Do not rename requirements.txt.
